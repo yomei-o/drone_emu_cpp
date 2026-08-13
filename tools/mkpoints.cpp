@@ -15,6 +15,7 @@
 #include <cmath>
 #include <vector>
 #include <algorithm>
+#include <functional>
 
 struct Pt { double x, y; int r, g, b, area; };
 
@@ -204,6 +205,43 @@ int main(int argc, char** argv) {
         p.r = std::min(255, cr*255/mx); p.g = std::min(255, cg*255/mx); p.b = std::min(255, cb*255/mx);
         grid[(size_t)gy * gw + gx] = (int)keep.size();
         keep.push_back(p);
+    }
+    // 外れ値を捨てる。地平線の雲や観客のスマホ画面を拾ってしまうと、
+    // 外接矩形が広がって本体が小さく配置されてしまう。
+    // それらは密集しているので「孤立点を落とす」だけでは残る。
+    // そこで点を塊にまとめ(近いもの同士を繋ぐ)、本体から離れた塊ごと捨てる。
+    {
+        int m = (int)keep.size();
+        std::vector<int> par(m);
+        for (int i = 0; i < m; ++i) par[i] = i;
+        std::function<int(int)> find = [&](int a) { while (par[a] != a) { par[a] = par[par[a]]; a = par[a]; } return a; };
+        double lim = Rmin * 6.0, lim2 = lim * lim;   // 絵の中の飛び石も同じ塊として繋ぐ
+        for (int i = 0; i < m; ++i) for (int j = i + 1; j < m; ++j) {
+            double dx = keep[i].x - keep[j].x, dy = keep[i].y - keep[j].y;
+            if (dx*dx + dy*dy < lim2) { int a = find(i), b = find(j); if (a != b) par[a] = b; }
+        }
+        std::vector<int> cnt(m, 0);
+        for (int i = 0; i < m; ++i) cnt[find(i)]++;
+        int big = 0; for (int i = 0; i < m; ++i) if (cnt[i] > cnt[big]) big = i;
+        // 本体の外接矩形
+        double mx0=1e9,mx1=-1e9,my0=1e9,my1=-1e9;
+        for (int i = 0; i < m; ++i) if (find(i) == big) {
+            mx0=std::min(mx0,keep[i].x); mx1=std::max(mx1,keep[i].x);
+            my0=std::min(my0,keep[i].y); my1=std::max(my1,keep[i].y);
+        }
+        double diag = sqrt((mx1-mx0)*(mx1-mx0) + (my1-my0)*(my1-my0));
+        double margin = diag * 0.12;
+        std::vector<Pt> ok;
+        for (int i = 0; i < m; ++i) {
+            if (find(i) == big) { ok.push_back(keep[i]); continue; }
+            if (cnt[find(i)] < 4) continue;                 // 小さすぎる塊は捨てる
+            // 本体の近くにある塊だけ残す(みゃくみゃくの周りの星のような飾り)
+            double dx = std::max({mx0 - keep[i].x, 0.0, keep[i].x - mx1});
+            double dy = std::max({my0 - keep[i].y, 0.0, keep[i].y - my1});
+            if (sqrt(dx*dx + dy*dy) < margin) ok.push_back(keep[i]);
+        }
+        fprintf(stderr, "塊 → 本体%d機 / 採用 %d → %d 機\n", cnt[big], m, (int)ok.size());
+        keep.swap(ok);
     }
     fprintf(stderr, "極大点 %d 個 → 採用 %d 機\n", (int)peak.size(), (int)keep.size());
 

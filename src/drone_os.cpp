@@ -124,15 +124,22 @@ static void formation_pos(int form, int i, int n, double& x, double& y, double& 
         static double bb[3][4] = {{1e9,-1e9,1e9,-1e9},{1e9,-1e9,1e9,-1e9},{1e9,-1e9,1e9,-1e9}};
         double* B = bb[which];
         if (B[1] < B[0]) {
-            for (int k = 0; k < NP; ++k) {
-                B[0] = std::min(B[0], (double)P[k][0]); B[1] = std::max(B[1], (double)P[k][0]);
-                B[2] = std::min(B[2], (double)P[k][1]); B[3] = std::max(B[3], (double)P[k][1]);
-            }
+            // 外れ値ひとつで外接矩形が広がると編隊が縮むので、上下1%を切った範囲で見る
+            std::vector<double> xs(NP), ys(NP);
+            for (int k = 0; k < NP; ++k) { xs[k] = P[k][0]; ys[k] = P[k][1]; }
+            std::sort(xs.begin(), xs.end()); std::sort(ys.begin(), ys.end());
+            int lo = NP / 100, hi = NP - 1 - NP / 100;
+            if (hi <= lo) { lo = 0; hi = NP - 1; }
+            B[0] = xs[lo]; B[1] = xs[hi]; B[2] = ys[lo]; B[3] = ys[hi];
         }
         int k = i % NP;
-        // 縦横のどちらが長くても画面に収まるよう、長いほうを基準に縮める。
+        // 長辺を基準に揃えると、画面が横長なので横長の絵だけ小さく見えてしまう。
+        // 画面の横と縦の両方に収まる倍率のうち、小さいほうを使って画面いっぱいにする。
         // 縦の中心はカメラが向いている高さに合わせる(固定値だと縦長の絵が見切れる)
-        double sc = FORM_SIZE / std::max(B[1] - B[0], B[3] - B[2]);
+        double ppm = FOC / CAMD;                     // 会場面での 1m あたりの画素数
+        double visW = FW / ppm, visH = FH / ppm;     // 見えている範囲 [m]
+        double bw = std::max(1e-6, B[1] - B[0]), bh = std::max(1e-6, B[3] - B[2]);
+        double sc = std::min(visW * 0.82 / bw, visH * 0.86 / bh);
         double cx = (B[0] + B[1]) * 0.5, cy = (B[2] + B[3]) * 0.5;
         x = ((double)P[k][0] - cx) * sc;
         y = FORM_Y - ((double)P[k][1] - cy) * sc;
