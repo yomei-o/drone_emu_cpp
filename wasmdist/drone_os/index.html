@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Suisou OS - 水槽 / ネオンテトラ (C++/WASM)</title>
+<style>
+  :root{ --fg:#7fd8d8; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; background:#050b0d; color:var(--fg); font-family:'Courier New',monospace;
+        min-height:100vh; display:flex; flex-direction:column; align-items:center; gap:12px; padding:16px; }
+  h1{ font-size:16px; margin:0; font-weight:700; }
+  .sub{ font-size:12px; color:#5f9c9c; max-width:960px; text-align:center; line-height:1.6; }
+  canvas{ width:min(96vw,960px); height:auto; background:#050b0d;
+          border:1px solid #244; border-radius:6px; box-shadow:0 6px 26px #000a; cursor:crosshair; }
+  #panel{ display:flex; flex-wrap:wrap; gap:14px; align-items:center; justify-content:center; max-width:960px; }
+  .ctl{ display:flex; flex-direction:column; font-size:11px; color:#5f9c9c; min-width:150px; }
+  .ctl b{ color:var(--fg); }
+  input[type=range]{ accent-color:var(--fg); }
+  button{ font-family:inherit; font-size:13px; padding:7px 13px; border:1px solid #366; border-radius:6px;
+          background:#0b1a1c; color:var(--fg); cursor:pointer; min-width:150px; transition:background .12s; }
+  button:hover{ background:#12292c; }
+  button.hit{ background:#bff; color:#062; }
+  button.primary{ background:var(--fg); color:#062028; border:none; font-weight:700; }
+  #status{ font-size:12px; color:#5f9c9c; font-variant-numeric:tabular-nums; min-height:1.2em; }
+  a{ color:var(--fg); }
+  body.fs{ padding:0; background:#000; gap:0; }
+  body.fs h1, body.fs .sub, body.fs #panel, body.fs #status{ display:none; }
+  body.fs canvas{ position:fixed; inset:0; width:100vw; height:100vh; max-width:none;
+                  object-fit:contain; border:none; border-radius:0; box-shadow:none; cursor:none; }
+</style>
+</head>
+<body>
+  <h1>🛸 ドローンショーシミュレータ <span style="color:#5f9c9c;font-size:12px">(C++ / WASM)</span></h1>
+  <p class="sub">
+    写真から拾った光点を目標に、ドローンを飛ばしています。あの<b>ゆったりした動き</b>と
+    <b>全機がピタッと同時に揃う</b>感じは、演出ではなく制約から出てきます。<br>
+    軌道は<b>最小ジャーク</b>（両端で速度も加速度もゼロ）。この軌道だと
+    v<sub>max</sub> = 1.875 d/T、a<sub>max</sub> = 5.77 d/T² と、距離と所要時間だけで上限が決まります。
+    そこで T を<b>「いちばん遠い機体が上限を守れる最小値」</b>に取り、全機がその同じ T を共有します。
+    だから近い機体はゆっくり動き、全員が同時に到着します。<br>
+    定点保持のゆらぎ（RTK-GPS の精度と風）も入れてあります。F キーで全画面。
+  </p>
+  <canvas id="cv"></canvas>
+  <div id="panel"></div>
+  <div id="status">読み込み中…</div>
+  <p class="sub">ソース: <a href="https://github.com/yomei-o/drone_emu_cpp">github.com/yomei-o/drone_emu_cpp</a></p>
+
+<script src="sim.js"></script>
+<script>
+"use strict";
+const SLIDERS = [
+  { id:0, label:"時間の進み", min:0.2, max:4.0, step:0.1, val:1.0, dec:1 },
+  { id:1, label:"光の強さ",   min:0.3, max:2.5, step:0.05, val:1.0, dec:2 },
+];
+const $=id=>document.getElementById(id);
+const cv=$("cv"), ctx=cv.getContext("2d"), panel=$("panel"), statusEl=$("status");
+let M=null, api={}, W=0, H=0, img=null, playing=true, frames=0, lastT=0, fpsAvg=0, lag=0;
+
+createSim().then(mod=>{
+  M=mod;
+  api.init  =M.cwrap("sim_init","number",["number","number"]);
+  api.w     =M.cwrap("sim_w","number",[]);
+  api.h     =M.cwrap("sim_h","number",[]);
+  api.reset =M.cwrap("sim_reset",null,[]);
+  api.step  =M.cwrap("sim_step",null,["number"]);
+  api.render=M.cwrap("sim_render","number",[]);
+  api.click =M.cwrap("sim_click",null,["number","number"]);
+  api.set   =M.cwrap("sim_set",null,["number","number"]);
+  api.action=M.cwrap("sim_action",null,["number"]);
+  api.get   =M.cwrap("sim_get","number",["number"]);
+  api.init(0,0);
+  W=api.w(); H=api.h(); cv.width=W; cv.height=H; img=ctx.createImageData(W,H);
+  buildPanel();
+  SLIDERS.forEach(s=>api.set(s.id, s.val));
+  loop();
+});
+
+function setText(el,s){ if(el.textContent!==s) el.textContent=s; }
+
+function buildPanel(){
+  SLIDERS.forEach(s=>{
+    const wrap=document.createElement("label"); wrap.className="ctl";
+    const head=document.createElement("span");
+    head.innerHTML=`${s.label} <b id="v${s.id}">${(+s.val).toFixed(s.dec)}</b>`;
+    const inp=document.createElement("input"); inp.type="range";
+    inp.min=s.min; inp.max=s.max; inp.step=s.step; inp.value=s.val;
+    inp.addEventListener("input",()=>{ $("v"+s.id).textContent=(+inp.value).toFixed(s.dec);
+                                       if(M)api.set(s.id,+inp.value); });
+    wrap.appendChild(head); wrap.appendChild(inp); panel.appendChild(wrap);
+  });
+  const hit=b=>{ b.classList.add("hit"); setTimeout(()=>b.classList.remove("hit"),150); };
+  const mk=(t,c)=>{ const b=document.createElement("button"); b.textContent=t;
+                    if(c)b.className=c; panel.appendChild(b); return b; };
+  const press=(b,fn)=>{ let last=0;
+    const run=()=>{ const n=performance.now(); if(n-last<300)return; last=n; hit(b); if(M)fn(); };
+    b.addEventListener("pointerdown",run); b.addEventListener("click",run); };
+
+  press(mk("🖼 写真1 の絵"),()=>api.action(0));
+  press(mk("🥤 写真2 の絵"),()=>api.action(1));
+  press(mk("🐱 ドラえもん"),()=>api.action(2));
+  press(mk("🔵 球"),()=>api.action(3));
+  press(mk("⭕ 輪"),()=>api.action(4));
+  press(mk("🛬 着陸"),()=>api.action(5));
+  press(mk("⛶ 全画面"),()=>toggleFs());
+  const pp=mk("⏸ 一時停止","primary");
+  press(pp,()=>{ playing=!playing; setText(pp,playing?"⏸ 一時停止":"▶ 再生"); if(playing){lastT=0;loop();} });
+  press(mk("⟲ リセット"),()=>{ api.action(6); frames=0; });
+}
+
+function applyFs(on){ document.body.classList.toggle("fs",on); if(M)api.set(2,on?0:1); }
+function toggleFs(){
+  if(document.fullscreenElement) document.exitFullscreen();
+  else (document.documentElement.requestFullscreen?.()||Promise.reject())
+        .catch(()=>applyFs(!document.body.classList.contains("fs")));
+}
+document.addEventListener("fullscreenchange",()=>applyFs(!!document.fullscreenElement));
+window.addEventListener("keydown",e=>{
+  if(e.key==="f"||e.key==="F") toggleFs();
+  else if(e.key==="Escape"&&!document.fullscreenElement) applyFs(false);
+});
+
+function blit(){ const p=api.render(); img.data.set(M.HEAPU8.subarray(p,p+W*H*4)); ctx.putImageData(img,0,0); }
+function loop(ts){
+  if(!playing) return;
+  if(lastT){ lag += Math.min(120, ts-lastT); const f=1000/(ts-lastT); fpsAvg = fpsAvg? fpsAvg*0.9+f*0.1 : f; }
+  lastT=ts;
+  let n=Math.max(1,Math.min(3,Math.round(lag/16.667)));
+  lag=Math.max(0,lag-n*16.667);
+  api.step(n); blit(); frames+=n;
+  setText(statusEl, `${fpsAvg.toFixed(0)} fps (x${n})   ${api.get(0)|0} 機   移動 ${(api.get(6)*100).toFixed(0)}% / T=${api.get(5).toFixed(0)}s   vmax ${api.get(1).toFixed(1)} m/s   amax ${api.get(2).toFixed(1)} m/s²   最接近 ${api.get(3).toFixed(1)} m`);
+  requestAnimationFrame(loop);
+}
+
+</script>
+</body>
+</html>
