@@ -35,6 +35,15 @@
   static const float ART_PTS[][5] = {{0.5f,0.5f,255,255,255}};
   #define HAVE_ART 0
 #endif
+// 文字やロゴを塗って作った編隊(tools/mktext.cpp が生成)。
+#if __has_include("text_pts.h")
+  #include "text_pts.h"
+  #define HAVE_TEXT 1
+#else
+  static const int TEXT_N = 1;
+  static const float TEXT_PTS[][5] = {{0.5f,0.5f,255,255,255}};
+  #define HAVE_TEXT 0
+#endif
 #include <vector>
 #include <cstdint>
 #include <cmath>
@@ -95,7 +104,7 @@ static std::vector<Drone> drones;
 static std::vector<int>   perm;      // 割り当て
 
 // 編隊
-enum { F_GROUND = 0, F_SHOW, F_SHOW2, F_ART, F_SPHERE, F_RING, F_N };
+enum { F_GROUND = 0, F_SHOW, F_SHOW2, F_ART, F_SPHERE, F_RING, F_TEXT, F_N };
 static int  curForm = F_GROUND;
 static int  phase = 0;               // 0=待機 1=移動中
 static double moveT = 1.0, moveElapsed = 0.0;
@@ -116,12 +125,15 @@ static double statVmax = 0, statAmax = 0, statSep = 1e9;
 // ---------------------------------------------------------------- 編隊の座標
 static void formation_pos(int form, int i, int n, double& x, double& y, double& z,
                           float& r, float& g, float& b) {
-    if (form == F_SHOW || form == F_SHOW2 || form == F_ART) {
+    if (form == F_SHOW || form == F_SHOW2 || form == F_ART || form == F_TEXT) {
         // 写真や絵から拾った点。外接矩形で正規化して会場いっぱいに広げる
-        int which = (form == F_SHOW) ? 0 : (form == F_SHOW2 ? 1 : 2);
-        const float (*P)[5] = (which == 0) ? SHOW_PTS : (which == 1) ? SHOW2_PTS : ART_PTS;
-        int NP = (which == 0) ? SHOW_N : (which == 1) ? SHOW2_N : ART_N;
-        static double bb[3][4] = {{1e9,-1e9,1e9,-1e9},{1e9,-1e9,1e9,-1e9},{1e9,-1e9,1e9,-1e9}};
+        int which = (form == F_SHOW) ? 0 : (form == F_SHOW2) ? 1 : (form == F_ART) ? 2 : 3;
+        const float (*PS[4])[5] = { SHOW_PTS, SHOW2_PTS, ART_PTS, TEXT_PTS };
+        const int NS[4] = { SHOW_N, SHOW2_N, ART_N, TEXT_N };
+        const float (*P)[5] = PS[which];
+        int NP = NS[which];
+        static double bb[4][4] = {{1e9,-1e9,1e9,-1e9},{1e9,-1e9,1e9,-1e9},
+                                  {1e9,-1e9,1e9,-1e9},{1e9,-1e9,1e9,-1e9}};
         double* B = bb[which];
         if (B[1] < B[0]) {
             // 外れ値ひとつで外接矩形が広がると編隊が縮むので、上下1%を切った範囲で見る
@@ -236,7 +248,7 @@ KEEP int sim_w() { return FW; }
 KEEP int sim_h() { return FH; }
 
 KEEP void sim_reset() {
-    int n = std::max(SHOW_N, std::max(SHOW2_N, ART_N));   // いちばん多い編隊に合わせる
+    int n = std::max(std::max(SHOW_N, SHOW2_N), std::max(ART_N, TEXT_N));   // いちばん多い編隊に合わせる
     drones.assign(n, Drone{});
     for (int i = 0; i < n; ++i) {
         Drone& d = drones[i];
@@ -288,6 +300,7 @@ KEEP void sim_action(int id) {
     else if (id == 4) assign(F_RING);
     else if (id == 5) assign(F_GROUND);
     else if (id == 6) sim_reset();
+    else if (id == 7) assign(F_TEXT);
 }
 KEEP void sim_click(double, double) { assign(F_SHOW); }
 
@@ -323,7 +336,8 @@ KEEP void sim_step(int frames) {
                     int nxt = (curForm == F_SHOW)   ? F_SPHERE
                             : (curForm == F_SPHERE) ? F_SHOW2
                             : (curForm == F_SHOW2)  ? F_ART
-                            : (curForm == F_ART)    ? F_RING
+                            : (curForm == F_ART)    ? F_TEXT
+                            : (curForm == F_TEXT)   ? F_RING
                             : F_SHOW;
                     assign(nxt);
                 }
@@ -424,7 +438,7 @@ KEEP uint8_t* sim_render() {
     if (p_hud >= 0.5) {
         Olivec_Canvas oc = olivec_canvas(px.data(), FW, FH, FW);
         char buf[200];
-        const char* fn[F_N] = { "GROUND", "PHOTO 1", "PHOTO 2", "ARTWORK", "SPHERE", "RING" };
+        const char* fn[F_N] = { "GROUND", "PHOTO 1", "PHOTO 2", "ARTWORK", "SPHERE", "RING", "TEXT" };
         snprintf(buf, sizeof(buf), "%d DRONES   %s   T=%.1fs  %.0f%%",
                  (int)drones.size(), fn[curForm], moveT, sim_get(6) * 100);
         olivec_text(oc, buf, 14, 12, olivec_default_font, 2, rgb(150, 190, 220));
@@ -448,7 +462,7 @@ int main(int argc, char** argv) {
     int steps = argc > 1 ? atoi(argv[1]) : 400;
     const char* out = argc > 2 ? argv[2] : "preview.png";
     if (argc > 3) sim_set(2, atof(argv[3]));
-    sim_action(argc > 4 ? atoi(argv[4]) : 0);   // 5番目 = 編隊(0写真1 1写真2 2ドラえもん 3球 4輪)
+    sim_action(argc > 4 ? atoi(argv[4]) : 0);   // 5番目 = 編隊(0写真1 1写真2 2ドラえもん 3球 4輪 7文字)
     for (int i = 0; i < steps; ++i) { sim_step(1); sim_render(); }
     uint8_t* p = sim_render();
     printf("drone_os: %dx%d frames=%d drones=%d form=%d\n", FW, FH, steps, (int)drones.size(), curForm);
