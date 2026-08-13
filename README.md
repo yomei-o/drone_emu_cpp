@@ -5,6 +5,15 @@
 [hanabi_emu_cpp](https://github.com/yomei-o/hanabi_emu_cpp) /
 [suisou_emu_cpp](https://github.com/yomei-o/suisou_emu_cpp) と同じ ABI・同じハーネス。
 
+## ▶ WASM デモ
+
+### **https://yomei-o.github.io/drone_emu_cpp/wasmdist/drone_os/**
+
+**🖼 写真1 の絵** / **🥤 写真2 の絵** / **🐱 ドラえもん** / **🔵 球** / **⭕ 輪** ボタンで編隊が切り替わり、
+全機が同じ所要時間 T を共有して**同時に到着**します。**🛬 着陸**で降ろせます。
+実測の最大速度・最大加速度・最接近距離は画面下に出ます。
+**⛶ 全画面**（または **F** キー）で文字を全部消してドローンだけの全画面に。
+
 ![preview](preview.png)
 
 ## 何をシミュレーションしているか
