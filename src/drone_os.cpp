@@ -78,6 +78,11 @@ static uint32_t rng = 987654321u;
 static inline double rnd() { rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5; return (rng & 0xFFFFFF) / (double)0x1000000; }
 static inline double rnds() { return rnd() * 2.0 - 1.0; }
 static inline int clampi(int v, int a, int b) { return v < a ? a : (v > b ? b : v); }
+static inline float smoothstep(float a, float b, float x) {
+    float t = (x - a) / (b - a);
+    if (t < 0) t = 0; if (t > 1) t = 1;
+    return t * t * (3.0f - 2.0f * t);
+}
 static inline uint32_t rgb(int r, int g, int b) {
     return 0xFF000000u | ((uint32_t)clampi(b,0,255) << 16) | ((uint32_t)clampi(g,0,255) << 8) | (uint32_t)clampi(r,0,255);
 }
@@ -99,6 +104,7 @@ struct Drone {
     float  r0, g0, b0;       // 前の色(遷移中に混ぜる)
     double jx, jy, jz;       // 位置保持のゆらぎ
     double jvx, jvy, jvz;
+    double twPh, twW;        // 瞬きの位相と速さ(個体ごと)
 };
 static std::vector<Drone> drones;
 static std::vector<int>   perm;      // 割り当て
@@ -256,6 +262,9 @@ KEEP void sim_reset() {
         formation_pos(F_GROUND, i, n, d.x, d.y, d.z, r, g, b);
         d.ax = d.bx = d.x; d.ay = d.by = d.y; d.az = d.bz = d.z;
         d.r = d.r0 = r; d.g = d.g0 = g; d.b = d.b0 = b;
+        // 瞬きは機体ごとにずらす。同じ位相だと編隊全体が一斉に明滅してしまう
+        d.twPh = rnd() * 6.2831853;
+        d.twW  = 1.6 + 1.9 * rnd();
     }
     curForm = F_GROUND; phase = 0; holdT = 1.5;
     moveElapsed = 0; moveT = 1;
@@ -401,37 +410,102 @@ KEEP uint8_t* sim_render() {
     }
 
     // --- 機体の光を加算
+    //
+    // 点光源が「きらきら」見えるのは、明るさが足りているからではなく
+    // **芯が飛んで白くなり、そこから条が伸びる**から。3つ重ねる:
+    //
+    //   芯   ごく狭くて強い。加算値が 1 を大きく超えるので、色の3成分が全部
+    //        飽和して**白**になる。ここが「きらっ」の正体。芯を弱くすると
+    //        (前はこれだった) どの画素も同じ中間の明るさに圧縮されて、
+    //        ぼんやりした色付きの円盤になる
+    //   暈   その周りの色の付いたにじみ。LED の色はここで見える
+    //   靄   広くて弱い。空気中の散乱。**強いと隣同士が繋がって霧になる**ので薄く
+    //
+    // さらに **回折条**(絞りの羽根や目のレンズで点光源が十字に伸びる)と、
+    // **瞬き**(330m 先の点光源は空気の揺らぎで明るさが揺れる。LED に指向性が
+    // あるので機体の姿勢の揺れも効く)を足す。
     std::fill(glow.begin(), glow.end(), 0.0f);
+    // 位置を実数で受けて、周りの4画素に振り分けて足す(条が階段にならない)
+    auto add_soft = [&](double fx, double fy, double w, const Drone& d) {
+        int X = (int)floor(fx - 0.5), Y = (int)floor(fy - 0.5);
+        double tx = (fx - 0.5) - X, ty = (fy - 0.5) - Y;
+        for (int j = 0; j < 2; ++j) for (int i = 0; i < 2; ++i) {
+            int xx = X + i, yy = Y + j;
+            if (xx < 0 || yy < 0 || xx >= FW || yy >= FH) continue;
+            double ww = w * (i ? tx : 1 - tx) * (j ? ty : 1 - ty);
+            float* p = &glow[((size_t)yy * FW + xx) * 3];
+            p[0] += (float)(d.r * ww); p[1] += (float)(d.g * ww); p[2] += (float)(d.b * ww);
+        }
+    };
     for (auto& d : drones) {
         double sx, sy, sc;
         project(d.x + d.jx, d.y + d.jy, d.z + d.jz, sx, sy, sc);
-        if (sx < -20 || sy < -20 || sx > FW + 20 || sy > FH + 20) continue;
+        if (sx < -24 || sy < -24 || sx > FW + 24 || sy > FH + 24) continue;
         double br = (d.y < 3.0) ? 0.22 : 1.0;             // 地上待機は暗い
         double dep = sc / FOC * 330.0;
-        // 実際の写真では、LED は「白く飛んだ芯」と「広がるにじみ」の二重に写る。
-        // 芯(狭くて強い)と暈(広くて弱い)を重ねると、あの光り方になる。
+        // 瞬き。周期の違う2つの sin の積なので、規則的な点滅には聞こえない
+        double tw = 1.0 + 0.42 * sin(simTime * d.twW + d.twPh) * sin(simTime * d.twW * 0.37 + d.twPh * 1.7);
+        double amp0 = br * p_glow * dep * tw;
         int cx = (int)sx, cy = (int)sy;
-        struct { int R; double amp, sig; } lobes[2] = { {2, 7.0, 1.45}, {9, 1.15, 0.048} };
-        for (int L = 0; L < 2; ++L) {
-            int R = lobes[L].R;
-            double amp = lobes[L].amp * br * p_glow * dep;
-            for (int dy = -R; dy <= R; ++dy) for (int dx = -R; dx <= R; ++dx) {
-                int X = cx + dx, Y = cy + dy;
-                if (X < 0 || Y < 0 || X >= FW || Y >= FH) continue;
-                double px2 = X + 0.5 - sx, py2 = Y + 0.5 - sy;
-                double w = exp(-(px2*px2 + py2*py2) * lobes[L].sig) * amp;
-                float* p = &glow[((size_t)Y * FW + X) * 3];
-                p[0] += (float)(d.r * w); p[1] += (float)(d.g * w); p[2] += (float)(d.b * w);
+        struct { int R; double amp, sig; } lobes[3] = {
+            { 2, 58.0, 2.60 },      // 芯(飛んで白くなる)
+            { 5,  4.6, 0.34 },      // 暈(色が見える)
+            {10,  0.55, 0.035 },    // 靄(薄く。濃いと隣と繋がって霧になる)
+        };
+        // ガウシアンは縦横に分けられる: exp(-(px²+py²)σ) = exp(-px²σ)·exp(-py²σ)。
+        // 画素ごとに exp を呼ぶと (2R+1)² 回だが、分ければ 2(2R+1) 回で済む
+        // (靄の R=10 なら 441回 → 42回。1300機ぶんなので、ここが描画の山だった)
+        double ex[24], ey[24];
+        for (int L = 0; L < 3; ++L) {
+            int R = lobes[L].R;                       // R ≤ 11 (ex/ey の大きさ)
+            double amp = lobes[L].amp * amp0, sig = lobes[L].sig;
+            for (int k = -R; k <= R; ++k) {
+                double p = cx + k + 0.5 - sx; ex[k + R] = exp(-p * p * sig);
+                double q = cy + k + 0.5 - sy; ey[k + R] = exp(-q * q * sig);
+            }
+            for (int dy = -R; dy <= R; ++dy) {
+                int Y = cy + dy;
+                if (Y < 0 || Y >= FH) continue;
+                double wy = ey[dy + R] * amp;
+                if (wy < 1e-5) continue;
+                float* row = &glow[(size_t)Y * FW * 3];
+                for (int dx = -R; dx <= R; ++dx) {
+                    int X = cx + dx;
+                    if (X < 0 || X >= FW) continue;
+                    double w = wy * ex[dx + R];
+                    float* p = &row[(size_t)X * 3];
+                    p[0] += (float)(d.r * w); p[1] += (float)(d.g * w); p[2] += (float)(d.b * w);
+                }
+            }
+        }
+        // 回折条。長さも明るさも瞬きで揺れるので、これが伸び縮みして「きらきら」する
+        double sp = 1.00 * amp0;
+        if (sp > 0.02) {
+            int LEN = (int)(8.0 * std::min(1.5, tw));
+            for (int k = 1; k <= LEN; ++k) {
+                double f = 1.0 - (double)k / (LEN + 1);
+                double w = sp * f * f * f;
+                add_soft(sx + k, sy, w, d); add_soft(sx - k, sy, w, d);
+                add_soft(sx, sy + k, w, d); add_soft(sx, sy - k, w, d);
             }
         }
     }
+    // 加算した光を画面に載せる。**成分ごとに圧縮してはいけない。**
+    // r/(1+r) を R,G,B 別々にかけると、明るいところから順に色が抜けて、
+    // 密な編隊(球など)が白い塊になってしまう。
+    // 明るさ(最大成分)だけ圧縮して色の向きは保ち、**芯だけ**白へ寄せる。
+    // 実際の LED も、飽和するほど明るい芯は白く写り、その周りに色が出る。
     for (size_t i = 0, np = (size_t)FW * FH; i < np; ++i) {
         float r = glow[i*3], g = glow[i*3+1], b = glow[i*3+2];
-        if (r + g + b < 0.004f) continue;
+        float mx = std::max(r, std::max(g, b));
+        if (mx < 0.002f) continue;
+        float t = mx / (1.0f + mx);          // 圧縮した明るさ
+        float s = t / mx;                    // 色の向きを保ったまま合わせる倍率
+        float wht = smoothstep(3.0f, 13.0f, mx);   // ここから上は飛んで白くなる
         uint32_t c = px[i];
-        int R = (int)((c & 255)        + 255.0f * (r / (1.0f + r)));
-        int G = (int)(((c >> 8) & 255) + 255.0f * (g / (1.0f + g)));
-        int B = (int)(((c >> 16) & 255)+ 255.0f * (b / (1.0f + b)));
+        int R = (int)((c & 255)        + 255.0f * (r * s + (t - r * s) * wht));
+        int G = (int)(((c >> 8) & 255) + 255.0f * (g * s + (t - g * s) * wht));
+        int B = (int)(((c >> 16) & 255)+ 255.0f * (b * s + (t - b * s) * wht));
         px[i] = rgb(R, G, B);
     }
 
@@ -462,6 +536,12 @@ int main(int argc, char** argv) {
     int steps = argc > 1 ? atoi(argv[1]) : 400;
     const char* out = argc > 2 ? argv[2] : "preview.png";
     if (argc > 3) sim_set(2, atof(argv[3]));
+    // 6番目 = 時間の進み。編隊が揃うまで 60秒以上かかるので、絵を作るときは早送りする
+    // (4倍にすれば 1000フレームで着く。揃ったあとの見た目は同じ)
+    if (argc > 5) sim_set(0, atof(argv[5]));
+    // 自動切替は切る。切らないと、到着から3秒後に次の編隊へ動き出してしまい、
+    // 「指定した編隊の絵」を撮ったつもりが移動中の絵になる(色だけ次の編隊に変わる)
+    sim_set(3, 0.0);
     sim_action(argc > 4 ? atoi(argv[4]) : 0);   // 5番目 = 編隊(0写真1 1写真2 2ドラえもん 3球 4輪 7文字)
     for (int i = 0; i < steps; ++i) { sim_step(1); sim_render(); }
     uint8_t* p = sim_render();
